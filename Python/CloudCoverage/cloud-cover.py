@@ -20,8 +20,8 @@ from influxdb_client.rest import ApiException
 FRIGATE_RECORDINGS_DIR = "/mnt/frigate/"
 CAMERA_NAME = "space"  # camera name folder
 HOUR_DIR = "00"        # the hour to analyze (midnight)
-MIN_BRIGHTNESS = 10    # calibration: darkest sky (0 cloud coverage)
-MAX_BRIGHTNESS = 45    # calibration: brightest sky (100 cloud coverage)
+MIN_BRIGHTNESS = 25    # calibration: darkest sky (0 cloud coverage)
+MAX_BRIGHTNESS = 43    # calibration: brightest sky (100 cloud coverage)
 MOON_THRESHOLD = 240   # brightness threshold to ignore moon pixels
 
 INFLUX_URL = "http://<ip>:8086"          # InfluxDB URL
@@ -56,18 +56,41 @@ def find_first_video(base_dir, date_str, hour, camera):
     return os.path.join(target_dir, files[0])
 
 def calculate_cloud_coverage(frame):
-    """Calculate average brightness and convert to 0-100 cloud coverage"""
+    """Estimate cloud coverage using brightness and contrast"""
+
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    # Mask out very bright pixels (moon, streetlights, etc.)
-    mask = gray < MOON_THRESHOLD
-    if np.count_nonzero(mask) == 0:
-        avg_brightness = gray.mean()
-    else:
-        avg_brightness = gray[mask].mean()
-    # Map brightness to cloud coverage
-    coverage = 100 * (avg_brightness - MIN_BRIGHTNESS) / (MAX_BRIGHTNESS - MIN_BRIGHTNESS)
-    coverage = max(0, min(100, coverage))  # clamp to 0-100
-    return coverage, avg_brightness
+
+    # Flatten array
+    flat = gray.flatten()
+
+    # Remove brightest pixels (moon, lights)
+    threshold = np.percentile(flat, 90)
+    filtered = flat[flat < threshold]
+
+    if len(filtered) == 0:
+        filtered = flat
+
+    avg_brightness = filtered.mean()
+
+    # Measure sky contrast
+    sky_std = filtered.std()
+
+    brightness_cloud = 100 * (avg_brightness - MIN_BRIGHTNESS) / (MAX_BRIGHTNESS - MIN_BRIGHTNESS)
+    brightness_cloud = np.clip(brightness_cloud, 0, 100)
+
+    # variance calibration based on observed data
+    VAR_CLEAR = 45
+    VAR_CLOUD = 5
+
+    contrast_score = (sky_std - VAR_CLOUD) / (VAR_CLEAR - VAR_CLOUD)
+    contrast_score = np.clip(contrast_score, 0, 1)
+
+    # invert because high variance = clear sky
+    contrast_modifier = 1 - contrast_score
+
+    cloud_coverage = brightness_cloud * contrast_modifier
+
+    return cloud_coverage, avg_brightness, sky_std
 
 def write_to_influx(cloud_coverage, target_date, hour):
     """Write the cloud coverage value to InfluxDB with debug output"""
@@ -117,6 +140,7 @@ def write_to_influx(cloud_coverage, target_date, hour):
         print(f"Body: {e.body}")
 
 def main():
+    print("-------------------------\n")
     target_date = get_target_date()
     print(f"Using date: {target_date}")
 
@@ -135,11 +159,12 @@ def main():
         print("Error: Could not read first frame of video.")
         return
 
-    cloud_coverage, avg_brightness = calculate_cloud_coverage(frame)
-    print(f"Average brightness (masked): {avg_brightness:.2f}")
+    cloud_coverage, avg_brightness, sky_std = calculate_cloud_coverage(frame)
+
+    print(f"Filtered brightness: {avg_brightness:.2f}")
+    print(f"Sky contrast (std dev): {sky_std:.2f}")
     print(f"Estimated cloud coverage: {cloud_coverage:.1f}%")
 
-    write_to_influx(cloud_coverage, target_date, HOUR_DIR)
+    # write_to_influx(cloud_coverage, target_date, HOUR_DIR)
 
 if __name__ == "__main__":
-    main()
