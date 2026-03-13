@@ -27,7 +27,7 @@ FRIGATE_RECORDINGS_DIR = "/mnt/frigate/"
 CAMERA_NAME = "space"
 HOUR_DIR = "00"
 
-TEST_DATE = "2026-03-02"   # blank for automatic
+TEST_DATE = "2026-03-08"   # blank for automatic
 
 FRAME_SAMPLE_COUNT = 25
 FRAME_STEP = 5
@@ -38,8 +38,8 @@ MIN_BRIGHTNESS = 25
 MAX_BRIGHTNESS = 120
 
 STAR_THRESHOLD = 200
-STAR_AREA_MIN = 1
-STAR_AREA_MAX = 16
+STAR_AREA_MIN = 2
+STAR_AREA_MAX = 25
 
 MOON_MASK_THRESHOLD = 240
 
@@ -74,7 +74,7 @@ def find_first_video(base_dir, date_str, hour, camera):
 
 def mask_moon(gray):
 
-    mask = gray < MOON_MASK_THRESHOLD
+    mask = gray < np.percentile(gray, 99.7)
     return gray * mask
 
 
@@ -82,11 +82,14 @@ def mask_moon(gray):
 
 def count_stars(gray):
 
-    blur = cv2.GaussianBlur(gray,(5,5),0)
+    mean = np.mean(gray)
+    std = np.std(gray)
+
+    threshold = mean + (2.2 * std)
 
     _, thresh = cv2.threshold(
-        blur,
-        STAR_THRESHOLD,
+        gray,
+        threshold,
         255,
         cv2.THRESH_BINARY
     )
@@ -133,7 +136,6 @@ def regional_star_counts(gray):
 
     return np.array(counts)
 
-
 # ---------------- Motion Detection ---------------- #
 
 def motion_score(frames):
@@ -173,6 +175,12 @@ def analyze_video(video_path):
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+            gray = cv2.resize(
+                gray,
+                (1024, 768),
+                interpolation=cv2.INTER_AREA
+            )
+
             gray = mask_moon(gray)
 
             frames.append(gray)
@@ -204,7 +212,7 @@ def analyze_video(video_path):
     contrast_score = 1 - np.clip(avg_contrast / 60,0,1)
 
     # star loss estimate
-    expected_stars = max(star_counts)
+    expected_stars = np.percentile(star_counts, 90)
     star_loss = 1 - (avg_stars / expected_stars if expected_stars else 0)
 
     star_loss = np.clip(star_loss,0,1)
