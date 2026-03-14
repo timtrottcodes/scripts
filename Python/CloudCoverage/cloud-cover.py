@@ -39,7 +39,7 @@ GRID_SIZE = 4
 MIN_BRIGHTNESS = 10
 MAX_BRIGHTNESS = 130
 
-CLEAR_STAR_BASELINE = 90
+CLEAR_STAR_BASELINE = 70
 STAR_THRESHOLD = 200
 STAR_AREA_MIN = 2
 STAR_AREA_MAX = 25
@@ -62,13 +62,21 @@ def get_target_date():
     yesterday = datetime.now() - timedelta(days=1)
     return yesterday.strftime("%Y-%m-%d")
 
+def find_first_video(base_dir, date_str, camera):
+    """
+    Find the first video just after midnight of the next day.
+    This represents the night of date_str.
+    """
 
-def find_first_video(base_dir, date_str, hour, camera):
+    target_date = datetime.strptime(date_str, "%Y-%m-%d")
+    next_day = target_date + timedelta(days=1)
 
-    target_dir = os.path.join(base_dir, date_str, hour, camera)
+    next_date_str = next_day.strftime("%Y-%m-%d")
+
+    target_dir = os.path.join(base_dir, next_date_str, "00", camera)
 
     if not os.path.isdir(target_dir):
-        raise FileNotFoundError(target_dir)
+        raise FileNotFoundError(f"No directory: {target_dir}")
 
     files = [f for f in os.listdir(target_dir) if f.endswith(".mp4")]
     files.sort()
@@ -76,8 +84,7 @@ def find_first_video(base_dir, date_str, hour, camera):
     if not files:
         raise FileNotFoundError("No video files")
 
-    return os.path.join(target_dir, files[0])
-
+    return os.path.join(target_dir, files[0]), next_date_str
 
 # ---------------- Moon Mask ---------------- #
 
@@ -188,6 +195,18 @@ def analyze_video(video_path):
                 (1024, 768),
                 interpolation=cv2.INTER_AREA
             )
+
+            # ---- SKY MASK ----
+            h, w = gray.shape
+
+            sky_mask = np.zeros_like(gray)
+
+            # keep only top 75% of frame
+            sky_mask[int(h*0.02):int(h*0.75), int(w*0.05):int(w*0.95)] = 1
+
+            gray = gray * sky_mask
+
+            # ------------------
 
             gray = mask_moon(gray)
 
@@ -305,10 +324,9 @@ def main():
 
     print("Using date:", date)
 
-    video = find_first_video(
+    video, video_date = find_first_video(
         FRIGATE_RECORDINGS_DIR,
         date,
-        HOUR_DIR,
         CAMERA_NAME
     )
 
