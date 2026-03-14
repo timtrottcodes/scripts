@@ -20,6 +20,8 @@ import os
 import cv2
 import numpy as np
 from datetime import datetime, timedelta
+from influxdb_client import InfluxDBClient, Point, WriteOptions
+from influxdb_client.rest import ApiException
 
 # ---------------- CONFIG ---------------- #
 
@@ -27,21 +29,28 @@ FRIGATE_RECORDINGS_DIR = "/mnt/frigate/"
 CAMERA_NAME = "space"
 HOUR_DIR = "00"
 
-TEST_DATE = "2026-03-08"   # blank for automatic
+TEST_DATE = ""   # blank for automatic
 
 FRAME_SAMPLE_COUNT = 25
 FRAME_STEP = 5
 
 GRID_SIZE = 4
 
-MIN_BRIGHTNESS = 25
-MAX_BRIGHTNESS = 120
+MIN_BRIGHTNESS = 10
+MAX_BRIGHTNESS = 130
 
+CLEAR_STAR_BASELINE = 90
 STAR_THRESHOLD = 200
 STAR_AREA_MIN = 2
 STAR_AREA_MAX = 25
 
 MOON_MASK_THRESHOLD = 240
+
+INFLUX_URL = "http://<ip>:8086"          # InfluxDB URL
+INFLUX_TOKEN = "<token>"             # API token
+INFLUX_ORG = "<org>"                 # Org name
+INFLUX_BUCKET = "<bucket>"                    # Bucket name
+INFLUX_MEASUREMENT = "cloud_coverage"        # Measurement name
 
 # ----------------------------------------
 
@@ -111,7 +120,6 @@ def count_stars(gray):
 
     return stars
 
-
 # ---------------- Region Sampling ---------------- #
 
 def regional_star_counts(gray):
@@ -136,6 +144,7 @@ def regional_star_counts(gray):
 
     return np.array(counts)
 
+
 # ---------------- Motion Detection ---------------- #
 
 def motion_score(frames):
@@ -149,7 +158,6 @@ def motion_score(frames):
         diffs.append(np.mean(diff))
 
     return np.mean(diffs)
-
 
 # ---------------- Main Estimator ---------------- #
 
@@ -209,26 +217,26 @@ def analyze_video(video_path):
     brightness_score = np.clip(brightness_score,0,1)
 
     # contrast score
-    contrast_score = 1 - np.clip(avg_contrast / 60,0,1)
+    contrast_score = np.clip(avg_contrast / 45, 0, 1)
 
     # star loss estimate
-    expected_stars = np.percentile(star_counts, 90)
-    star_loss = 1 - (avg_stars / expected_stars if expected_stars else 0)
-
-    star_loss = np.clip(star_loss,0,1)
+    star_loss = 1 - (avg_stars / CLEAR_STAR_BASELINE)
+    star_loss = np.clip(star_loss, 0, 1)
 
     # motion normalization
     motion_norm = np.clip(motion / 25,0,1)
 
     # weighted fusion
     cloud_score = (
-        brightness_score * 0.35 +
-        contrast_score * 0.25 +
-        star_loss * 0.30 +
-        motion_norm * 0.10
+        brightness_score * 0.15 +
+        contrast_score * 0.30 +
+        star_loss * 0.53 +
+        motion_norm * 0.02
     )
 
     cloud_percent = np.clip(cloud_score * 100,0,100)
+
+    # print("Star counts per frame:", star_counts)
 
     return {
         "brightness": avg_brightness,
@@ -238,6 +246,54 @@ def analyze_video(video_path):
         "cloud_percent": cloud_percent
     }
 
+# ---------------- Influx Logging ---------------- #
+
+def write_to_influx(cloud_coverage, target_date, hour):
+    """Write the cloud coverage value to InfluxDB with debug output"""
+
+    print("\n--- INFLUX DEBUG INFO ---")
+    print(f"URL: {INFLUX_URL}")
+    print(f"Org: {INFLUX_ORG}")
+    print(f"Bucket: {INFLUX_BUCKET}")
+    print(f"Measurement: {INFLUX_MEASUREMENT}")
+    print(f"Camera tag: {CAMERA_NAME}")
+    print(f"Timestamp: {target_date}T{hour}:00:00Z")
+    print(f"Cloud percent: {cloud_coverage}")
+    print(f"Token (first 8 chars): {INFLUX_TOKEN[:8]}...")
+    print("-------------------------\n")
+
+    try:
+        with InfluxDBClient(
+            url=INFLUX_URL,
+            token=INFLUX_TOKEN,
+            org=INFLUX_ORG,
+            debug=True  # enables HTTP debug logging
+        ) as client:
+
+            write_api = client.write_api(
+                write_options=WriteOptions(write_type="synchronous")
+            )
+
+            point = (
+                Point(INFLUX_MEASUREMENT)
+                .tag("camera", CAMERA_NAME)
+                .field("cloud_percent", float(cloud_coverage))
+                .time(f"{target_date}T{hour}:00:00Z")
+            )
+
+            write_api.write(
+                bucket=INFLUX_BUCKET,
+                org=INFLUX_ORG,
+                record=point
+            )
+
+            print("Write successful.")
+
+    except ApiException as e:
+        print("InfluxDB API Exception:")
+        print(f"Status: {e.status}")
+        print(f"Reason: {e.reason}")
+        print(f"Body: {e.body}")
 
 # ---------------- MAIN ---------------- #
 
@@ -267,6 +323,8 @@ def main():
     print(f"Star count         : {result['stars']:.1f}")
     print(f"Cloud motion       : {result['motion']:.2f}")
     print(f"\nEstimated clouds   : {result['cloud_percent']:.1f}%\n")
+
+    write_to_influx(result['cloud_percent'], date, HOUR_DIR)
 
 
 if __name__ == "__main__":
