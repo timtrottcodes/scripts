@@ -7,6 +7,7 @@ import tempfile
 import sys
 import re
 import json
+import time
 
 # --- Configuration ---
 CWD = Path.cwd()
@@ -22,9 +23,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 LOG_DIR = CWD / "Logs"
 LOG_DIR.mkdir(exist_ok=True)
 
-RESIZE_WIDTH = 1024
-RESIZE_HEIGHT = 768
-METDET_SENSITIVITY = "normal"
+RESIZE_WIDTH = 960
+RESIZE_HEIGHT = 544
+METDET_SENSITIVITY = "low"
 
 # Categories to ignore
 IGNORE_CATEGORIES = ["BUGS", "DROPPED"]
@@ -47,7 +48,7 @@ def get_scan_window():
         base_date = datetime.strptime(SCAN_DATE, "%Y-%m-%d").date()
 
         start_time = datetime.combine(base_date, datetime.min.time()).replace(
-            hour=20, minute=0, second=0
+            hour=22, minute=0, second=0
         )
 
         end_time = datetime.combine(base_date + timedelta(days=1), datetime.min.time()).replace(
@@ -58,7 +59,7 @@ def get_scan_window():
         today = datetime.now().date()
 
         start_time = datetime.combine(today - timedelta(days=1), datetime.min.time()).replace(
-            hour=20, minute=0, second=0
+            hour=22, minute=0, second=0
         )
 
         end_time = datetime.combine(today, datetime.min.time()).replace(
@@ -107,7 +108,7 @@ def resize_video_ffmpeg(input_path, width, height):
 
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
-        "-vf", f"scale={width}:{height}",
+        "-vf", f"scale={width}:{height},drawbox=y=380:h=164:color=black:t=fill",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         tmp_path
     ]
@@ -122,8 +123,7 @@ def check_objects(video_path, log_file):
         str(video_path),
         "--mode", "backend",
         "--save-path", "/tmp",
-        "--sensitivity", METDET_SENSITIVITY,
-        "--mask", str(CWD / "mask.png")
+        "--sensitivity", METDET_SENSITIVITY
     ]
 
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -157,10 +157,13 @@ def check_objects(video_path, log_file):
     return categories
 
 def save_detected_video(src_video, categories):
-    ts = datetime.fromtimestamp(src_video.stat().st_mtime)
-    date_str = ts.strftime("%Y-%m-%d")
-    time_str = ts.strftime("%H%M%S")
     saved_paths = []
+
+    date_str = src_video.parents[2].name
+    hour_str = src_video.parents[1].name
+    original_name = src_video.name
+
+    new_filename = f"{date_str}_{hour_str}_{original_name}"
 
     for cat in categories:
         if cat.upper() in IGNORE_CATEGORIES:
@@ -168,14 +171,17 @@ def save_detected_video(src_video, categories):
 
         out_dir = OUTPUT_DIR / date_str / cat.lower()
         out_dir.mkdir(parents=True, exist_ok=True)
-        ext = src_video.suffix if src_video.suffix else ".mp4"
-        dest = out_dir / f"{time_str}{ext}"
+
+        dest = out_dir / new_filename
         shutil.copy2(src_video, dest)
+
         saved_paths.append(dest)
+
     return saved_paths
 
 # --- Main ---
 def main():
+    script_start = time.time()
     now = datetime.now()
 
     start_time, end_time = get_scan_window()
@@ -193,7 +199,10 @@ def main():
 
         for i, vid in enumerate(videos, start=1):
             try:
-                print(f"Processing video {i} of {total_videos}: {vid}")
+                video_start = time.time()
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                print(f"{ts} Processing video {i} of {total_videos}: {vid}", flush=True)
 
                 resized_path = resize_video_ffmpeg(vid, RESIZE_WIDTH, RESIZE_HEIGHT)
 
@@ -204,13 +213,21 @@ def main():
                 if categories:
                     saved_files = save_detected_video(vid, categories)
                     for f in saved_files:
-                        print(f"Saved {f}")
+                        print(f"  Saved {f}")
+
+                video_elapsed = time.time() - video_start
+                print(f"{ts} Finished video {i} in {video_elapsed:.2f} seconds")
             except Exception as e:
                 print(f"Error processing {vid}: {e}")
                 continue
 
-    print(f"\nMetDetPy logs saved to: {log_path}")
+    total_elapsed = time.time() - script_start
 
+    print("\n================================")
+    print(f"Total videos processed: {total_videos}")
+    print(f"Total runtime: {total_elapsed/60:.2f} minutes ({total_elapsed:.2f} seconds)")
+    print(f"MetDetPy logs saved to: {log_path}")
+    print("================================")
 
 if __name__ == "__main__":
     main()
