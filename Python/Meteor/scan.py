@@ -8,6 +8,8 @@ import sys
 import re
 import json
 import time
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # --- Configuration ---
 CWD = Path.cwd()
@@ -109,7 +111,7 @@ def resize_video_ffmpeg(input_path, width, height):
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-vf", f"scale={width}:{height},drawbox=y=380:h=164:color=black:t=fill",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
         tmp_path
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -179,6 +181,39 @@ def save_detected_video(src_video, categories):
 
     return saved_paths
 
+def process_video(i, total_videos, vid, log_path):
+    video_start = time.time()
+
+    try:
+        resized_path = resize_video_ffmpeg(vid, RESIZE_WIDTH, RESIZE_HEIGHT)
+
+        with open(log_path, "a") as log_file:
+            categories = check_objects(resized_path, log_file)
+
+        Path(resized_path).unlink(missing_ok=True)
+
+        saved_files = []
+        if categories:
+            saved_files = save_detected_video(vid, categories)
+
+        elapsed = time.time() - video_start
+
+        return {
+            "index": i,
+            "video": vid,
+            "elapsed": elapsed,
+            "categories": categories,
+            "saved": saved_files
+        }
+
+    except Exception as e:
+        return {
+            "index": i,
+            "video": vid,
+            "elapsed": None,
+            "error": str(e)
+        }
+
 # --- Main ---
 def main():
     script_start = time.time()
@@ -197,29 +232,59 @@ def main():
 
         print(f"Found {total_videos} videos to process\n")
 
-        for i, vid in enumerate(videos, start=1):
-            try:
-                video_start = time.time()
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        workers = min(4, os.cpu_count() or 1)
+        print(f"Using {workers} parallel workers\n")
 
-                print(f"{ts} Processing video {i} of {total_videos}: {vid}", flush=True)
+        completed = 0
 
-                resized_path = resize_video_ffmpeg(vid, RESIZE_WIDTH, RESIZE_HEIGHT)
+        with ProcessPoolExecutor(max_workers=workers) as executor:
 
-                categories = check_objects(resized_path, log_file)
+            futures = [
+                executor.submit(process_video, i, total_videos, vid, log_path)
+                for i, vid in enumerate(videos, start=1)
+            ]
 
-                Path(resized_path).unlink(missing_ok=True)
+            for future in as_completed(futures):
 
-                if categories:
-                    saved_files = save_detected_video(vid, categories)
-                    for f in saved_files:
-                        print(f"  Saved {f}")
+                result = future.result()
+                completed += 1
 
-                video_elapsed = time.time() - video_start
-                print(f"{ts} Finished video {i} in {video_elapsed:.2f} seconds")
-            except Exception as e:
-                print(f"Error processing {vid}: {e}")
-                continue
+                if "error" in result:
+                    print(f"Error processing {result['video']}: {result['error']}")
+                    continue
+
+                i = result["index"]
+                vid = result["video"]
+                elapsed = result["elapsed"]
+                categories = result["categories"]
+                saved = result["saved"]
+
+                runtime = time.time() - script_start
+                avg_time = runtime / completed
+                remaining = total_videos - completed
+                eta_seconds = remaining * avg_time
+                pct = (completed / total_videos) * 100
+
+                h, r = divmod(int(eta_seconds), 3600)
+                m, s = divmod(r, 60)
+                eta_str = f"{h}h{m:02d}m"
+
+                tag_list = [c for c in categories if c.upper() not in IGNORE_CATEGORIES]
+
+                if tag_list:
+                    tags = ",".join(sorted(set(tag_list)))
+                    print(
+                        f"[{completed}/{total_videos} | {pct:.1f}%] "
+                        f"Processed in {elapsed:.2f}s "
+                        f"found {{{tags}}}, saved | ETA {eta_str}",
+                        flush=True
+                    )
+                else:
+                    print(
+                        f"[{completed}/{total_videos} | {pct:.1f}%] "
+                        f"Processed in {elapsed:.2f}s | ETA {eta_str}",
+                        flush=True
+                    )
 
     total_elapsed = time.time() - script_start
 
