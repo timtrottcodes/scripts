@@ -105,13 +105,14 @@ def get_video_files(start_time, end_time):
     return videos
 
 def resize_video_ffmpeg(input_path, width, height):
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4")
+    tmp_fd, tmp_path = tempfile.mkstemp(dir="/dev/shm", suffix=".mp4")
     Path(tmp_path).unlink()  # ffmpeg will create it
 
     cmd = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-vf", f"scale={width}:{height},drawbox=y=380:h=164:color=black:t=fill",
         "-pix_fmt", "yuv420p",
+        "-threads", "1",
         tmp_path
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -232,7 +233,7 @@ def main():
 
         print(f"Found {total_videos} videos to process\n")
 
-        workers = min(4, os.cpu_count() or 1)
+        workers = min(3, os.cpu_count() or 1)
         print(f"Using {workers} parallel workers\n")
 
         completed = 0
